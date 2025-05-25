@@ -10,7 +10,6 @@ permissions:
 
 env:
   AI_MODEL: "openai/gpt-4.1"
-  LIST_MODELS: "false"
   DIFF_CHAR_LIMIT: "20000"
 
 jobs:
@@ -85,32 +84,6 @@ jobs:
           } >> $GITHUB_OUTPUT
           
           echo "DEBUG: Diff content has been set to GITHUB_OUTPUT"
-
-      - name: Check List Available Models
-        id: list-models
-        if: steps.get-diff.outputs.has_changes == 'true' && env.LIST_MODELS == 'true'
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          echo "=========================================="
-          echo "DEBUG: Listing available models from GitHub Models API"
-          echo "=========================================="
-          
-          echo "DEBUG: Making API request to list models..."
-          MODELS_RESPONSE=$(curl -L "https://models.github.ai/catalog/models" \
-             -H "Accept: application/vnd.github+json" \
-             -H "Authorization: Bearer $GITHUB_TOKEN" \
-             -H "X-GitHub-Api-Version: 2022-11-28")
-          
-          echo "DEBUG: Models API response received"
-
-          echo "DEBUG: Raw models response:"
-          echo "$MODELS_RESPONSE"
-          
-          echo "DEBUG: Extracting model IDs..."
-          echo "$MODELS_RESPONSE" | jq -r '.[] | .id'
-          
-          echo "=========================================="
 
       - name: AI Code Review
         id: code-review
