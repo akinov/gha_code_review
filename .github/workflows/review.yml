@@ -1,0 +1,234 @@
+name: AI Code Review
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  pull-requests: write
+  contents: read
+  models: read
+
+env:
+  AI_MODEL: "openai/gpt-4.1"
+  LIST_MODELS: "false"
+  DIFF_CHAR_LIMIT: "20000"
+
+jobs:
+  code-review:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    env:
+      REVIEW_PROMPT: |
+        以下のPull Requestの差分をコードレビューしてください。
+
+        コードの品質、セキュリティ、パフォーマンス、ベストプラクティスに関して以下の観点で評価してください：
+
+        1. コードの品質・可読性
+        2. セキュリティ上の問題
+        3. パフォーマンスへの影響
+        4. バグの可能性
+        5. ベストプラクティスの遵守
+
+        改善提案がある場合は、具体的な修正方法も含めて説明してください。
+
+        以下がコードの差分です：
+    steps:
+      - name: Debug workflow info
+        run: |
+          echo "=========================================="
+          echo "DEBUG: Workflow started"
+          echo "=========================================="
+          echo "Event: ${{ github.event_name }}"
+          echo "PR Number: ${{ github.event.number }}"
+          echo "Repository: ${{ github.repository }}"
+          echo "Actor: ${{ github.actor }}"
+          echo "Ref: ${{ github.ref }}"
+          echo "SHA: ${{ github.sha }}"
+          echo "=========================================="
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get PR diff
+        id: get-diff
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "=========================================="
+          echo "DEBUG: Getting PR diff for PR #${{ github.event.number }}"
+          echo "=========================================="
+          
+          gh pr diff ${{ github.event.number }} > pr_diff.txt
+          
+          echo "DEBUG: Checking if diff file exists and has content..."
+          ls -la pr_diff.txt || echo "DEBUG: pr_diff.txt not found"
+          
+          if [ ! -s pr_diff.txt ]; then
+            echo "DEBUG: No changes found in PR"
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          echo "DEBUG: Changes found, setting has_changes=true"
+          echo "has_changes=true" >> $GITHUB_OUTPUT
+          
+          echo "DEBUG: Reading diff content (first $DIFF_CHAR_LIMIT chars)..."
+          DIFF_CONTENT=$(cat pr_diff.txt | head -c $DIFF_CHAR_LIMIT)
+          echo "DEBUG: Diff content length: $(echo -n "$DIFF_CONTENT" | wc -c) characters"
+          
+          {
+            echo "diff<<EOF"
+            echo "$DIFF_CONTENT"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+          
+          echo "DEBUG: Diff content has been set to GITHUB_OUTPUT"
+
+      - name: Check List Available Models
+        id: list-models
+        if: steps.get-diff.outputs.has_changes == 'true' && env.LIST_MODELS == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "=========================================="
+          echo "DEBUG: Listing available models from GitHub Models API"
+          echo "=========================================="
+          
+          echo "DEBUG: Making API request to list models..."
+          MODELS_RESPONSE=$(curl -L "https://models.github.ai/catalog/models" \
+             -H "Accept: application/vnd.github+json" \
+             -H "Authorization: Bearer $GITHUB_TOKEN" \
+             -H "X-GitHub-Api-Version: 2022-11-28")
+          
+          echo "DEBUG: Models API response received"
+
+          echo "DEBUG: Raw models response:"
+          echo "$MODELS_RESPONSE"
+          
+          echo "DEBUG: Extracting model IDs..."
+          echo "$MODELS_RESPONSE" | jq -r '.[] | .id'
+          
+          echo "=========================================="
+
+      - name: AI Code Review
+        id: code-review
+        if: steps.get-diff.outputs.has_changes == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "=========================================="
+          echo "DEBUG: Starting AI Code Review"
+          echo "Using AI Model: $AI_MODEL"
+          echo "=========================================="
+                    
+          # 前のステップで作成されたpr_diff.txtを直接使用（より安全）
+          if [ -f "pr_diff.txt" ]; then
+            echo "DEBUG: Using pr_diff.txt created in previous step"
+            echo "DEBUG: Retrieved diff content length: $(wc -c < pr_diff.txt) characters"
+          else
+            echo "ERROR: pr_diff.txt not found"
+            exit 1
+          fi
+
+          # プロンプトテキストを作成
+          echo "${REVIEW_PROMPT}" > prompt.txt
+          echo "" >> prompt.txt
+          cat pr_diff.txt >> prompt.txt
+          
+          echo "DEBUG: Creating JSON prompt..."
+          PROMPT=$(cat prompt.txt | jq -Rs .)
+          echo "DEBUG: JSON prompt created successfully"
+          
+          echo "DEBUG: Making API request to GitHub Models..."
+          RAW_RESPONSE=$(curl -s "https://models.github.ai/inference/chat/completions" \
+             -H "Content-Type: application/json" \
+             -H "Authorization: Bearer $GITHUB_TOKEN" \
+             -d "{
+              \"messages\": [
+                  {
+                     \"role\": \"user\",
+                     \"content\": $PROMPT
+                  }
+               ],
+               \"model\": \"$AI_MODEL\"
+            }")
+
+          echo "DEBUG: API response received"
+          echo "$RAW_RESPONSE" > raw_response.json
+          echo "DEBUG: Raw response saved to raw_response.json"
+
+          echo "DEBUG: Extracting content from response..."
+          CONTENT=$(echo "$RAW_RESPONSE" | jq -r '.choices[0].message.content')
+          
+          if [ "$CONTENT" = "null" ] || [ -z "$CONTENT" ]; then
+            echo "DEBUG: ERROR - No content received from API"
+            echo "DEBUG: Raw response: $RAW_RESPONSE"
+            exit 1
+          fi
+          
+          echo "DEBUG: Content extracted successfully, length: $(echo -n "$CONTENT" | wc -c) characters"
+          echo "$CONTENT"
+          echo "$CONTENT" > review_response.txt
+
+          {
+            echo "review<<EOF"
+            echo "$CONTENT"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+
+          {
+            echo "raw_response<<EOF"
+            echo "$RAW_RESPONSE"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+          
+          echo "DEBUG: Review content set to GITHUB_OUTPUT"
+
+      - name: Comment on PR
+        if: steps.get-diff.outputs.has_changes == 'true'
+        uses: actions/github-script@v7
+        env:
+          REVIEW_CONTENT: ${{ steps.code-review.outputs.review }}
+          AI_MODEL: ${{ env.AI_MODEL }}
+        with:
+          script: |
+            console.log('DEBUG: Starting PR comment creation...');
+            
+            const reviewContent = process.env.REVIEW_CONTENT || 'No review content available';
+            const aiModel = process.env.AI_MODEL || 'AI Model';
+            const review = `## 🤖 AI Code Review by ${aiModel}
+
+            ${reviewContent}
+
+            ---
+            *This review was automatically generated by ${aiModel}*`;
+
+            console.log('DEBUG: Review content length:', review.length);
+            console.log('DEBUG: Creating comment on PR...');
+
+            try {
+              const result = await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: review
+              });
+              console.log('DEBUG: Comment created successfully, ID:', result.data.id);
+            } catch (error) {
+              console.log('DEBUG: Error creating comment:', error.message);
+              throw error;
+            }
+
+      - name: Output review as log
+        if: steps.get-diff.outputs.has_changes == 'true'
+        run: |
+          echo "=========================================="
+          echo "DEBUG: Final review output"
+          echo "=========================================="
+          echo "AI Code Review by $AI_MODEL:"
+          echo "=========================================="
+          echo "${{ steps.code-review.outputs.review }}"
+          echo "=========================================="
+          echo "DEBUG: Review output completed"
